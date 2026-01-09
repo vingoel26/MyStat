@@ -1,0 +1,9 @@
+export { default as Landing } from './Landing';
+export { default as Login } from './Login';
+export { default as Signup } from './Signup';
+export { default as Dashboard } from './Dashboard';
+export { default as Platforms } from './Platforms';
+export { default as Problems } from './Problems';
+export { default as Analytics } from './Analytics';
+export { default as PublicProfile } from './PublicProfile';
+export { default as Settings } from './Settings';
