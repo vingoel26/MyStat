@@ -2,6 +2,7 @@ import { createContext, useContext, useState, useCallback, useEffect } from 'rea
 import { mockPlatformAccounts, mockSubmissions, mockRatingHistory, mockDailyStats } from '../data/mockData';
 import { PLATFORMS } from '../utils/constants';
 import { platformApi } from '../services/api';
+import { useAuth } from './AuthContext';
 
 const PlatformContext = createContext(null);
 
@@ -9,6 +10,7 @@ const PlatformContext = createContext(null);
 const USE_REAL_API = true; // Set to false to force mock data
 
 export const PlatformProvider = ({ children }) => {
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
   const [platforms, setPlatforms] = useState([]);
   const [submissions, setSubmissions] = useState([]);
   const [ratingHistory, setRatingHistory] = useState({});
@@ -18,8 +20,21 @@ export const PlatformProvider = ({ children }) => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Load connected platforms on mount
+  // Load connected platforms when authenticated
   useEffect(() => {
+    // Wait for auth to finish loading
+    if (authLoading) {
+      return;
+    }
+
+    // Only fetch if authenticated
+    if (!isAuthenticated) {
+      setIsLoading(false);
+      setPlatforms([]);
+      setRatingHistory({});
+      return;
+    }
+
     const loadPlatforms = async () => {
       if (!USE_REAL_API) {
         // Use mock data
@@ -30,13 +45,16 @@ export const PlatformProvider = ({ children }) => {
         return;
       }
 
+      setIsLoading(true);
       try {
         const response = await platformApi.getConnected();
         if (response.success) {
-          setPlatforms(response.data || []);
+          const platformData = response.data || [];
+          setPlatforms(platformData);
+          
           // Build rating history from platform data
           const history = {};
-          (response.data || []).forEach(p => {
+          platformData.forEach(p => {
             if (p.profileData?.ratingHistory || p.profileData?.contestHistory) {
               history[p.platform] = (p.profileData.ratingHistory || p.profileData.contestHistory || [])
                 .map(c => ({
@@ -48,13 +66,37 @@ export const PlatformProvider = ({ children }) => {
             }
           });
           setRatingHistory(Object.keys(history).length > 0 ? history : {});
+          
+          // Build submissions from recent submissions in platform data
+          const allSubmissions = [];
+          platformData.forEach(p => {
+            const recentSubs = p.profileData?.recentSubmissions || [];
+            recentSubs.forEach((sub, idx) => {
+              allSubmissions.push({
+                id: `${p.platform}_${sub.titleSlug || sub.problemId || idx}_${sub.timestamp || idx}`,
+                platform: p.platform,
+                problemId: sub.titleSlug || sub.problemId || `problem_${idx}`,
+                problemName: sub.title || sub.name || sub.problemName || 'Unknown Problem',
+                problemUrl: sub.url || sub.problemUrl || '#',
+                difficulty: sub.difficulty?.toLowerCase() || 'medium',
+                status: sub.status?.toLowerCase().includes('accept') ? 'solved' : 'attempted',
+                language: sub.language || 'cpp',
+                submittedAt: sub.timestamp 
+                  ? new Date(parseInt(sub.timestamp) * 1000).toISOString()
+                  : new Date().toISOString(),
+                tags: sub.tags || [],
+              });
+            });
+          });
+          setSubmissions(allSubmissions);
         } else {
           // Start with empty platforms - user can add their own
           setPlatforms([]);
           setRatingHistory({});
+          setSubmissions([]);
         }
       } catch (err) {
-        console.error('Backend not available, starting fresh:', err);
+        console.error('Failed to load platforms:', err);
         // Start with empty platforms - allows user to add real ones
         setPlatforms([]);
         setSubmissions([]);
@@ -66,13 +108,12 @@ export const PlatformProvider = ({ children }) => {
     };
 
     loadPlatforms();
-  }, []);
+  }, [isAuthenticated, authLoading]);
 
-  // Get available platforms to add
+  // Get available platforms to add (all platforms available since multiple accounts per platform are allowed)
   const getAvailablePlatforms = useCallback(() => {
-    const connectedIds = new Set(platforms.map(p => p.platform));
-    return Object.values(PLATFORMS).filter(p => !connectedIds.has(p.id));
-  }, [platforms]);
+    return Object.values(PLATFORMS);
+  }, []);
 
   // Add a new platform
   const addPlatform = useCallback(async (platformId, username) => {

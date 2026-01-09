@@ -1,5 +1,5 @@
 import bcrypt from 'bcryptjs';
-import { query } from '../config/database.js';
+import User from '../models/User.js';
 import { generateTokens, verifyRefreshToken } from '../middleware/auth.js';
 
 /**
@@ -15,8 +15,8 @@ export const register = async (req, res) => {
         }
 
         // Check if email exists
-        const existingUser = await query('SELECT id FROM users WHERE email = $1', [email]);
-        if (existingUser.rows.length > 0) {
+        const existingUser = await User.findOne({ email });
+        if (existingUser) {
             return res.status(400).json({ error: 'Email already registered' });
         }
 
@@ -24,8 +24,8 @@ export const register = async (req, res) => {
         let username = email.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
 
         // Ensure username is unique
-        const existingUsername = await query('SELECT id FROM users WHERE username = $1', [username]);
-        if (existingUsername.rows.length > 0) {
+        const existingUsername = await User.findOne({ username });
+        if (existingUsername) {
             username = `${username}${Date.now().toString(36)}`;
         }
 
@@ -33,21 +33,20 @@ export const register = async (req, res) => {
         const passwordHash = await bcrypt.hash(password, 12);
 
         // Create user
-        const result = await query(
-            `INSERT INTO users (name, email, username, password_hash) 
-       VALUES ($1, $2, $3, $4) 
-       RETURNING id, name, email, username, is_public, created_at`,
-            [name, email, username, passwordHash]
-        );
+        const user = await User.create({
+            name,
+            email,
+            username,
+            password_hash: passwordHash
+        });
 
-        const user = result.rows[0];
-        const tokens = generateTokens(user.id);
+        const tokens = generateTokens(user._id.toString());
 
-        // TODO: Store refresh token in sessions table
+        // TODO: Store refresh token in sessions collection
 
         res.status(201).json({
             user: {
-                id: user.id,
+                id: user._id,
                 name: user.name,
                 email: user.email,
                 username: user.username,
@@ -73,16 +72,10 @@ export const login = async (req, res) => {
         }
 
         // Find user
-        const result = await query(
-            'SELECT id, name, email, username, password_hash, is_public FROM users WHERE email = $1',
-            [email]
-        );
-
-        if (result.rows.length === 0) {
+        const user = await User.findOne({ email });
+        if (!user) {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
-
-        const user = result.rows[0];
 
         // Verify password
         const isValid = await bcrypt.compare(password, user.password_hash);
@@ -90,13 +83,13 @@ export const login = async (req, res) => {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
-        const tokens = generateTokens(user.id);
+        const tokens = generateTokens(user._id.toString());
 
-        // TODO: Store refresh token in sessions table
+        // TODO: Store refresh token in sessions collection
 
         res.json({
             user: {
-                id: user.id,
+                id: user._id,
                 name: user.name,
                 email: user.email,
                 username: user.username,
@@ -115,7 +108,7 @@ export const login = async (req, res) => {
  */
 export const logout = async (req, res) => {
     try {
-        // TODO: Invalidate refresh token in sessions table
+        // TODO: Invalidate refresh token in sessions collection
         res.json({ message: 'Logged out successfully' });
     } catch (error) {
         console.error('Logout error:', error);
@@ -139,7 +132,7 @@ export const refreshToken = async (req, res) => {
             return res.status(401).json({ error: 'Invalid refresh token' });
         }
 
-        // TODO: Verify token exists in sessions table
+        // TODO: Verify token exists in sessions collection
 
         const tokens = generateTokens(decoded.userId);
 
@@ -175,19 +168,15 @@ export const getCurrentUser = async (req, res) => {
             return res.status(401).json({ error: 'Not authenticated' });
         }
 
-        const result = await query(
-            `SELECT id, name, email, username, bio, avatar_url, is_public, skills, social_links, created_at 
-       FROM users WHERE id = $1`,
-            [req.user.id]
-        );
+        const user = await User.findById(req.user.id)
+            .select('-password_hash');
 
-        if (result.rows.length === 0) {
+        if (!user) {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        const user = result.rows[0];
         res.json({
-            id: user.id,
+            id: user._id,
             name: user.name,
             email: user.email,
             username: user.username,

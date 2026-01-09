@@ -147,6 +147,15 @@ export const userApi = {
 
     getPublicProfile: (username) =>
         apiRequest(`/users/${username}`),
+
+    getPublicStats: (username) =>
+        apiRequest(`/users/${username}/stats`),
+
+    getPublicPlatforms: (username) =>
+        apiRequest(`/users/${username}/platforms`),
+
+    getPublicAchievements: (username) =>
+        apiRequest(`/users/${username}/achievements`),
 };
 
 /**

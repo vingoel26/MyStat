@@ -1,24 +1,37 @@
 /**
  * Platform Controller
- * Handles all platform-related API endpoints
+ * Handles all platform-related API endpoints using MongoDB
  */
 
 import { fetchPlatformProfile, fetchMultiplePlatformProfiles, SUPPORTED_PLATFORMS } from '../services/platforms/index.js';
-
-// In-memory store for demo (replace with database in production)
-const userPlatforms = new Map();
+import PlatformAccount from '../models/PlatformAccount.js';
 
 /**
  * Get all connected platforms for current user
  */
 export async function getConnectedPlatforms(req, res) {
     try {
-        const userId = req.user?.id || 'demo_user';
-        const platforms = userPlatforms.get(userId) || [];
+        const userId = req.user?.id;
+
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                error: 'Authentication required'
+            });
+        }
+
+        const platforms = await PlatformAccount.find({ user: userId });
 
         res.json({
             success: true,
-            data: platforms
+            data: platforms.map(p => ({
+                id: p._id,
+                platform: p.platform,
+                platformUsername: p.platform_username,
+                isVerified: p.is_verified,
+                lastSyncedAt: p.last_synced_at,
+                profileData: p.profile_data,
+            }))
         });
     } catch (error) {
         res.status(500).json({
@@ -34,7 +47,14 @@ export async function getConnectedPlatforms(req, res) {
 export async function connectPlatform(req, res) {
     try {
         const { platform, username } = req.body;
-        const userId = req.user?.id || 'demo_user';
+        const userId = req.user?.id;
+
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                error: 'Authentication required'
+            });
+        }
 
         if (!platform || !username) {
             return res.status(400).json({
@@ -61,32 +81,53 @@ export async function connectPlatform(req, res) {
             });
         }
 
-        // Store the connected platform
-        const userPlatformList = userPlatforms.get(userId) || [];
-
-        // Check if already connected
-        const existingIndex = userPlatformList.findIndex(p => p.platform === platform);
-
-        const platformData = {
-            id: `${platform}_${Date.now()}`,
+        // Check if this exact username is already connected for this platform
+        const existingAccount = await PlatformAccount.findOne({
+            user: userId,
             platform,
-            platformUsername: username,
-            isVerified: true,
-            lastSyncedAt: new Date().toISOString(),
-            profileData: result.data,
-        };
+            platform_username: username
+        });
 
-        if (existingIndex >= 0) {
-            userPlatformList[existingIndex] = platformData;
-        } else {
-            userPlatformList.push(platformData);
+        if (existingAccount) {
+            // Update existing account
+            existingAccount.is_verified = true;
+            existingAccount.last_synced_at = new Date();
+            existingAccount.profile_data = result.data;
+            await existingAccount.save();
+
+            return res.json({
+                success: true,
+                data: {
+                    id: existingAccount._id,
+                    platform: existingAccount.platform,
+                    platformUsername: existingAccount.platform_username,
+                    isVerified: existingAccount.is_verified,
+                    lastSyncedAt: existingAccount.last_synced_at,
+                    profileData: existingAccount.profile_data,
+                }
+            });
         }
 
-        userPlatforms.set(userId, userPlatformList);
+        // Create new platform account (allows multiple accounts per platform)
+        const platformAccount = await PlatformAccount.create({
+            user: userId,
+            platform,
+            platform_username: username,
+            is_verified: true,
+            last_synced_at: new Date(),
+            profile_data: result.data,
+        });
 
         res.json({
             success: true,
-            data: platformData
+            data: {
+                id: platformAccount._id,
+                platform: platformAccount.platform,
+                platformUsername: platformAccount.platform_username,
+                isVerified: platformAccount.is_verified,
+                lastSyncedAt: platformAccount.last_synced_at,
+                profileData: platformAccount.profile_data,
+            }
         });
     } catch (error) {
         res.status(500).json({
@@ -102,12 +143,16 @@ export async function connectPlatform(req, res) {
 export async function disconnectPlatform(req, res) {
     try {
         const { platformId } = req.params;
-        const userId = req.user?.id || 'demo_user';
+        const userId = req.user?.id;
 
-        const userPlatformList = userPlatforms.get(userId) || [];
-        const filtered = userPlatformList.filter(p => p.id !== platformId);
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                error: 'Authentication required'
+            });
+        }
 
-        userPlatforms.set(userId, filtered);
+        await PlatformAccount.findOneAndDelete({ _id: platformId, user: userId });
 
         res.json({
             success: true,
@@ -127,22 +172,26 @@ export async function disconnectPlatform(req, res) {
 export async function syncPlatform(req, res) {
     try {
         const { platformId } = req.params;
-        const userId = req.user?.id || 'demo_user';
+        const userId = req.user?.id;
 
-        const userPlatformList = userPlatforms.get(userId) || [];
-        const platformIndex = userPlatformList.findIndex(p => p.id === platformId);
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                error: 'Authentication required'
+            });
+        }
 
-        if (platformIndex < 0) {
+        const platformAccount = await PlatformAccount.findOne({ _id: platformId, user: userId });
+
+        if (!platformAccount) {
             return res.status(404).json({
                 success: false,
                 error: 'Platform not found'
             });
         }
 
-        const platform = userPlatformList[platformIndex];
-
         // Fetch fresh data from the platform API
-        const result = await fetchPlatformProfile(platform.platform, platform.platformUsername);
+        const result = await fetchPlatformProfile(platformAccount.platform, platformAccount.platform_username);
 
         if (!result.success) {
             return res.status(400).json({
@@ -152,17 +201,20 @@ export async function syncPlatform(req, res) {
         }
 
         // Update the stored data
-        userPlatformList[platformIndex] = {
-            ...platform,
-            lastSyncedAt: new Date().toISOString(),
-            profileData: result.data,
-        };
-
-        userPlatforms.set(userId, userPlatformList);
+        platformAccount.last_synced_at = new Date();
+        platformAccount.profile_data = result.data;
+        await platformAccount.save();
 
         res.json({
             success: true,
-            data: userPlatformList[platformIndex]
+            data: {
+                id: platformAccount._id,
+                platform: platformAccount.platform,
+                platformUsername: platformAccount.platform_username,
+                isVerified: platformAccount.is_verified,
+                lastSyncedAt: platformAccount.last_synced_at,
+                profileData: platformAccount.profile_data,
+            }
         });
     } catch (error) {
         res.status(500).json({
@@ -177,10 +229,18 @@ export async function syncPlatform(req, res) {
  */
 export async function syncAllPlatforms(req, res) {
     try {
-        const userId = req.user?.id || 'demo_user';
-        const userPlatformList = userPlatforms.get(userId) || [];
+        const userId = req.user?.id;
 
-        if (userPlatformList.length === 0) {
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                error: 'Authentication required'
+            });
+        }
+
+        const platforms = await PlatformAccount.find({ user: userId });
+
+        if (platforms.length === 0) {
             return res.json({
                 success: true,
                 data: [],
@@ -189,31 +249,35 @@ export async function syncAllPlatforms(req, res) {
         }
 
         // Fetch data for all platforms
-        const accounts = userPlatformList.map(p => ({
+        const accounts = platforms.map(p => ({
             platform: p.platform,
-            username: p.platformUsername
+            username: p.platform_username
         }));
 
         const results = await fetchMultiplePlatformProfiles(accounts);
 
         // Update stored data
-        const updatedList = userPlatformList.map((platform, index) => {
-            const result = results[index];
+        const updatedPlatforms = [];
+        for (let i = 0; i < platforms.length; i++) {
+            const result = results[i];
             if (result.success) {
-                return {
-                    ...platform,
-                    lastSyncedAt: new Date().toISOString(),
-                    profileData: result.data,
-                };
+                platforms[i].last_synced_at = new Date();
+                platforms[i].profile_data = result.data;
+                await platforms[i].save();
             }
-            return platform;
-        });
-
-        userPlatforms.set(userId, updatedList);
+            updatedPlatforms.push({
+                id: platforms[i]._id,
+                platform: platforms[i].platform,
+                platformUsername: platforms[i].platform_username,
+                isVerified: platforms[i].is_verified,
+                lastSyncedAt: platforms[i].last_synced_at,
+                profileData: platforms[i].profile_data,
+            });
+        }
 
         res.json({
             success: true,
-            data: updatedList
+            data: updatedPlatforms
         });
     } catch (error) {
         res.status(500).json({
@@ -229,10 +293,16 @@ export async function syncAllPlatforms(req, res) {
 export async function getPlatformSubmissions(req, res) {
     try {
         const { platformId } = req.params;
-        const userId = req.user?.id || 'demo_user';
+        const userId = req.user?.id;
 
-        const userPlatformList = userPlatforms.get(userId) || [];
-        const platform = userPlatformList.find(p => p.id === platformId);
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                error: 'Authentication required'
+            });
+        }
+
+        const platform = await PlatformAccount.findOne({ _id: platformId, user: userId });
 
         if (!platform) {
             return res.status(404).json({
@@ -242,7 +312,7 @@ export async function getPlatformSubmissions(req, res) {
         }
 
         // Return cached submissions from profile data
-        const submissions = platform.profileData?.recentSubmissions || [];
+        const submissions = platform.profile_data?.recentSubmissions || [];
 
         res.json({
             success: true,
@@ -262,10 +332,16 @@ export async function getPlatformSubmissions(req, res) {
 export async function getPlatformContests(req, res) {
     try {
         const { platformId } = req.params;
-        const userId = req.user?.id || 'demo_user';
+        const userId = req.user?.id;
 
-        const userPlatformList = userPlatforms.get(userId) || [];
-        const platform = userPlatformList.find(p => p.id === platformId);
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                error: 'Authentication required'
+            });
+        }
+
+        const platform = await PlatformAccount.findOne({ _id: platformId, user: userId });
 
         if (!platform) {
             return res.status(404).json({
@@ -275,8 +351,8 @@ export async function getPlatformContests(req, res) {
         }
 
         // Return cached contest history from profile data
-        const contests = platform.profileData?.contestHistory ||
-            platform.profileData?.ratingHistory || [];
+        const contests = platform.profile_data?.contestHistory ||
+            platform.profile_data?.ratingHistory || [];
 
         res.json({
             success: true,

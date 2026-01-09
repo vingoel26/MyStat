@@ -46,4 +46,11 @@ router.get('/:username/stats', userController.getUserStats);
  */
 router.get('/:username/achievements', userController.getAchievements);
 
+/**
+ * @route   GET /api/users/:username/platforms
+ * @desc    Get user's connected platforms
+ * @access  Public (respects privacy settings)
+ */
+router.get('/:username/platforms', userController.getUserPlatforms);
+
 export default router;

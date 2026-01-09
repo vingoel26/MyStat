@@ -1,4 +1,9 @@
-import { query } from '../config/database.js';
+import User from '../models/User.js';
+import Achievement from '../models/Achievement.js';
+import Submission from '../models/Submission.js';
+import Contest from '../models/Contest.js';
+import PlatformAccount from '../models/PlatformAccount.js';
+import DailyStat from '../models/DailyStat.js';
 
 /**
  * Get public user profile
@@ -7,25 +12,20 @@ export const getPublicProfile = async (req, res) => {
     try {
         const { username } = req.params;
 
-        const result = await query(
-            `SELECT id, name, username, bio, avatar_url, is_public, skills, social_links, created_at 
-       FROM users WHERE username = $1`,
-            [username]
-        );
+        const user = await User.findOne({ username })
+            .select('-password_hash');
 
-        if (result.rows.length === 0) {
+        if (!user) {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        const user = result.rows[0];
-
         // Check if profile is public
-        if (!user.is_public && (!req.user || req.user.id !== user.id)) {
+        if (!user.is_public && (!req.user || req.user.id !== user._id.toString())) {
             return res.status(403).json({ error: 'This profile is private' });
         }
 
         res.json({
-            id: user.id,
+            id: user._id,
             name: user.name,
             username: user.username,
             bio: user.bio,
@@ -47,24 +47,24 @@ export const updateProfile = async (req, res) => {
     try {
         const { name, bio, skills, socialLinks } = req.body;
 
-        const result = await query(
-            `UPDATE users 
-       SET name = COALESCE($1, name),
-           bio = COALESCE($2, bio),
-           skills = COALESCE($3, skills),
-           social_links = COALESCE($4, social_links)
-       WHERE id = $5
-       RETURNING id, name, username, bio, avatar_url, is_public, skills, social_links`,
-            [name, bio, skills, socialLinks, req.user.id]
-        );
+        const updateData = {};
+        if (name !== undefined) updateData.name = name;
+        if (bio !== undefined) updateData.bio = bio;
+        if (skills !== undefined) updateData.skills = skills;
+        if (socialLinks !== undefined) updateData.social_links = socialLinks;
 
-        if (result.rows.length === 0) {
+        const user = await User.findByIdAndUpdate(
+            req.user.id,
+            updateData,
+            { new: true, runValidators: true }
+        ).select('-password_hash');
+
+        if (!user) {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        const user = result.rows[0];
         res.json({
-            id: user.id,
+            id: user._id,
             name: user.name,
             username: user.username,
             bio: user.bio,
@@ -86,19 +86,20 @@ export const updateSettings = async (req, res) => {
     try {
         const { isPublic } = req.body;
 
-        const result = await query(
-            `UPDATE users 
-       SET is_public = COALESCE($1, is_public)
-       WHERE id = $2
-       RETURNING id, is_public`,
-            [isPublic, req.user.id]
+        const updateData = {};
+        if (isPublic !== undefined) updateData.is_public = isPublic;
+
+        const user = await User.findByIdAndUpdate(
+            req.user.id,
+            updateData,
+            { new: true }
         );
 
-        if (result.rows.length === 0) {
+        if (!user) {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        res.json({ isPublic: result.rows[0].is_public });
+        res.json({ isPublic: user.is_public });
     } catch (error) {
         console.error('Update settings error:', error);
         res.status(500).json({ error: 'Failed to update settings' });
@@ -110,7 +111,9 @@ export const updateSettings = async (req, res) => {
  */
 export const deleteAccount = async (req, res) => {
     try {
-        await query('DELETE FROM users WHERE id = $1', [req.user.id]);
+        await User.findByIdAndDelete(req.user.id);
+        // Note: Related documents will need to be cleaned up
+        // Consider adding cascade delete logic or using pre-remove hooks
         res.json({ message: 'Account deleted successfully' });
     } catch (error) {
         console.error('Delete account error:', error);
@@ -126,44 +129,44 @@ export const getUserStats = async (req, res) => {
         const { username } = req.params;
 
         // Get user
-        const userResult = await query(
-            'SELECT id, is_public FROM users WHERE username = $1',
-            [username]
-        );
+        const user = await User.findOne({ username }).select('_id is_public');
 
-        if (userResult.rows.length === 0) {
+        if (!user) {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        const user = userResult.rows[0];
-
         // Check privacy
-        if (!user.is_public && (!req.user || req.user.id !== user.id)) {
+        if (!user.is_public && (!req.user || req.user.id !== user._id.toString())) {
             return res.status(403).json({ error: 'Stats are private' });
         }
 
-        // Get stats from view
-        const statsResult = await query(
-            'SELECT * FROM user_stats_summary WHERE user_id = $1',
-            [user.id]
-        );
+        // Aggregate stats
+        const [submissionStats, contestCount, platformCount, lastActive] = await Promise.all([
+            Submission.aggregate([
+                { $match: { user: user._id } },
+                {
+                    $group: {
+                        _id: null,
+                        total: { $sum: 1 },
+                        solved: { $sum: { $cond: [{ $eq: ['$status', 'solved'] }, 1, 0] } }
+                    }
+                }
+            ]),
+            Contest.countDocuments({ user: user._id }),
+            PlatformAccount.countDocuments({ user: user._id }),
+            DailyStat.findOne({ user: user._id, problems_solved: { $gt: 0 } })
+                .sort({ date: -1 })
+                .select('date')
+        ]);
 
-        if (statsResult.rows.length === 0) {
-            return res.json({
-                totalSubmissions: 0,
-                totalSolved: 0,
-                totalContests: 0,
-                connectedPlatforms: 0,
-            });
-        }
+        const stats = submissionStats[0] || { total: 0, solved: 0 };
 
-        const stats = statsResult.rows[0];
         res.json({
-            totalSubmissions: stats.total_submissions,
-            totalSolved: stats.total_solved,
-            totalContests: stats.total_contests,
-            connectedPlatforms: stats.connected_platforms,
-            lastActiveDate: stats.last_active_date,
+            totalSubmissions: stats.total,
+            totalSolved: stats.solved,
+            totalContests: contestCount,
+            connectedPlatforms: platformCount,
+            lastActiveDate: lastActive?.date || null,
         });
     } catch (error) {
         console.error('Get user stats error:', error);
@@ -179,22 +182,16 @@ export const getAchievements = async (req, res) => {
         const { username } = req.params;
 
         // Get user
-        const userResult = await query(
-            'SELECT id FROM users WHERE username = $1',
-            [username]
-        );
+        const user = await User.findOne({ username }).select('_id');
 
-        if (userResult.rows.length === 0) {
+        if (!user) {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        const achievements = await query(
-            `SELECT achievement_key, name, description, icon, unlocked_at 
-       FROM achievements WHERE user_id = $1 ORDER BY unlocked_at DESC`,
-            [userResult.rows[0].id]
-        );
+        const achievements = await Achievement.find({ user: user._id })
+            .sort({ unlocked_at: -1 });
 
-        res.json(achievements.rows.map(a => ({
+        res.json(achievements.map(a => ({
             key: a.achievement_key,
             name: a.name,
             description: a.description,
@@ -204,5 +201,40 @@ export const getAchievements = async (req, res) => {
     } catch (error) {
         console.error('Get achievements error:', error);
         res.status(500).json({ error: 'Failed to get achievements' });
+    }
+};
+
+/**
+ * Get user platforms (public)
+ */
+export const getUserPlatforms = async (req, res) => {
+    try {
+        const { username } = req.params;
+
+        // Get user
+        const user = await User.findOne({ username }).select('_id is_public');
+
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        // Check privacy
+        if (!user.is_public && (!req.user || req.user.id !== user._id.toString())) {
+            return res.status(403).json({ error: 'Profile is private' });
+        }
+
+        const platforms = await PlatformAccount.find({ user: user._id });
+
+        res.json(platforms.map(p => ({
+            id: p._id,
+            platform: p.platform,
+            platformUsername: p.platform_username,
+            isVerified: p.is_verified,
+            lastSyncedAt: p.last_synced_at,
+            profileData: p.profile_data,
+        })));
+    } catch (error) {
+        console.error('Get user platforms error:', error);
+        res.status(500).json({ error: 'Failed to get platforms' });
     }
 };

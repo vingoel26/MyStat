@@ -10,30 +10,96 @@ import {
   MapPin,
   Calendar,
   Check,
+  AlertCircle,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import Button from '../components/common/Button';
 import Badge from '../components/common/Badge';
 import Avatar from '../components/common/Avatar';
 import { Footer } from '../components/layout';
 import { PlatformCard, RatingGraph, DifficultyChart } from '../components/dashboard';
-import {
-  mockUser,
-  mockPlatformAccounts,
-  mockRatingHistory,
-  mockDifficultyDistribution,
-  mockAchievements,
-  mockSummaryStats,
-} from '../data/mockData';
+import { userApi } from '../services/api';
 import { formatDate } from '../utils/formatters';
 
 const PublicProfile = () => {
   const { username } = useParams();
   const [copied, setCopied] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [user, setUser] = useState(null);
+  const [platforms, setPlatforms] = useState([]);
+  const [stats, setStats] = useState(null);
 
-  // In production, fetch user data based on username
-  const user = mockUser;
-  const platforms = mockPlatformAccounts;
+  // Fetch all profile data
+  useEffect(() => {
+    const fetchProfileData = async () => {
+      setIsLoading(true);
+      setError(null);
+      
+      try {
+        // Fetch user profile, platforms, and stats in parallel
+        const [profileRes, platformsRes, statsRes] = await Promise.all([
+          userApi.getPublicProfile(username),
+          userApi.getPublicPlatforms(username).catch(() => []),
+          userApi.getPublicStats(username).catch(() => null),
+        ]);
+
+        setUser(profileRes);
+        setPlatforms(Array.isArray(platformsRes) ? platformsRes : []);
+        setStats(statsRes);
+      } catch (err) {
+        console.error('Failed to load profile:', err);
+        setError(err.message || 'Failed to load profile');
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    if (username) {
+      fetchProfileData();
+    }
+  }, [username]);
+
+  // Build rating history from platforms
+  const ratingHistory = useMemo(() => {
+    const history = {};
+    platforms.forEach(p => {
+      if (p.profileData?.ratingHistory || p.profileData?.contestHistory) {
+        history[p.platform] = (p.profileData.ratingHistory || p.profileData.contestHistory || [])
+          .map(c => ({
+            date: c.ratingUpdateTimeSeconds 
+              ? new Date(c.ratingUpdateTimeSeconds * 1000).toISOString().split('T')[0]
+              : c.endTime || c.startTime || new Date().toISOString().split('T')[0],
+            rating: c.newRating || c.rating || 0,
+          }));
+      }
+    });
+    return history;
+  }, [platforms]);
+
+  // Compute difficulty distribution from platforms
+  const difficultyDistribution = useMemo(() => {
+    let easy = 0, medium = 0, hard = 0;
+    platforms.forEach(p => {
+      if (p.profileData) {
+        easy += p.profileData.easy || 0;
+        medium += p.profileData.medium || 0;
+        hard += p.profileData.hard || 0;
+      }
+    });
+    return { easy, medium, hard };
+  }, [platforms]);
+
+  // Compute summary stats from platforms
+  const summaryStats = useMemo(() => {
+    const totalSolved = platforms.reduce((sum, p) => sum + (p.profileData?.problemsSolved || 0), 0);
+    const totalContests = platforms.reduce((sum, p) => sum + (p.profileData?.contestsParticipated || 0), 0);
+    return {
+      totalProblemsSolved: totalSolved || stats?.totalSolved || 0,
+      totalContests: totalContests || stats?.totalContests || 0,
+      currentStreak: 0, // Would need daily stats
+    };
+  }, [platforms, stats]);
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText(window.location.href);
@@ -43,7 +109,7 @@ const PublicProfile = () => {
 
   const handleShare = (platform) => {
     const url = encodeURIComponent(window.location.href);
-    const text = encodeURIComponent(`Check out ${user.name}'s coding profile on DevStats!`);
+    const text = encodeURIComponent(`Check out ${user?.name || username}'s coding profile on DevStats!`);
     
     const shareUrls = {
       twitter: `https://twitter.com/intent/tweet?url=${url}&text=${text}`,
@@ -52,6 +118,26 @@ const PublicProfile = () => {
 
     window.open(shareUrls[platform], '_blank');
   };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-[#0a0a0f] flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-[#6366f1] border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (error || !user) {
+    return (
+      <div className="min-h-screen bg-[#0a0a0f] flex items-center justify-center">
+        <div className="text-center">
+          <AlertCircle className="w-16 h-16 text-[#ef4444] mx-auto mb-4" />
+          <h2 className="text-2xl font-bold text-[#f8fafc] mb-2">Profile Not Found</h2>
+          <p className="text-[#94a3b8]">{error || `User @${username} doesn't exist or their profile is private.`}</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#0a0a0f]">
@@ -187,15 +273,15 @@ const PublicProfile = () => {
           className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8"
         >
           <div className="bg-[#12121a] border border-[#2a2a35] rounded-xl p-4 text-center">
-            <p className="text-3xl font-bold gradient-text">{mockSummaryStats.totalProblemsSolved}</p>
+            <p className="text-3xl font-bold gradient-text">{summaryStats.totalProblemsSolved}</p>
             <p className="text-sm text-[#64748b]">Problems Solved</p>
           </div>
           <div className="bg-[#12121a] border border-[#2a2a35] rounded-xl p-4 text-center">
-            <p className="text-3xl font-bold text-[#22c55e]">{mockSummaryStats.currentStreak}</p>
+            <p className="text-3xl font-bold text-[#22c55e]">{summaryStats.currentStreak}</p>
             <p className="text-sm text-[#64748b]">Day Streak</p>
           </div>
           <div className="bg-[#12121a] border border-[#2a2a35] rounded-xl p-4 text-center">
-            <p className="text-3xl font-bold text-[#f59e0b]">{mockSummaryStats.totalContests}</p>
+            <p className="text-3xl font-bold text-[#f59e0b]">{summaryStats.totalContests}</p>
             <p className="text-sm text-[#64748b]">Contests</p>
           </div>
           <div className="bg-[#12121a] border border-[#2a2a35] rounded-xl p-4 text-center">
@@ -205,79 +291,61 @@ const PublicProfile = () => {
         </motion.div>
 
         {/* Connected Platforms */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, delay: 0.4 }}
-          className="mb-8"
-        >
-          <h2 className="text-xl font-semibold text-[#f8fafc] mb-4">Connected Platforms</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {platforms.slice(0, 4).map((platform, index) => (
-              <PlatformCard
-                key={platform.id}
-                platform={platform.platform}
-                username={platform.platformUsername}
-                profileData={platform.profileData}
-                isVerified={platform.isVerified}
-                lastSyncedAt={platform.lastSyncedAt}
-                showActions={false}
-                delay={index * 0.1}
-              />
-            ))}
-          </div>
-        </motion.div>
+        {platforms.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, delay: 0.4 }}
+            className="mb-8"
+          >
+            <h2 className="text-xl font-semibold text-[#f8fafc] mb-4">Connected Platforms</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {platforms.map((platform, index) => (
+                <PlatformCard
+                  key={platform.id}
+                  platform={platform.platform}
+                  username={platform.platformUsername}
+                  profileData={platform.profileData}
+                  isVerified={platform.isVerified}
+                  lastSyncedAt={platform.lastSyncedAt}
+                  showActions={false}
+                  delay={index * 0.1}
+                />
+              ))}
+            </div>
+          </motion.div>
+        )}
 
         {/* Rating Chart */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, delay: 0.5 }}
-          className="mb-8"
-        >
-          <RatingGraph
-            ratingHistory={mockRatingHistory}
-            platforms={['codeforces', 'leetcode']}
-            title="Rating History"
-          />
-        </motion.div>
+        {Object.keys(ratingHistory).length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, delay: 0.5 }}
+            className="mb-8"
+          >
+            <RatingGraph
+              ratingHistory={ratingHistory}
+              platforms={platforms.filter(p => p.profileData?.rating).map(p => p.platform)}
+              title="Rating History"
+            />
+          </motion.div>
+        )}
 
         {/* Difficulty Chart */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, delay: 0.6 }}
-          className="mb-8"
-        >
-          <DifficultyChart
-            data={mockDifficultyDistribution}
-            title="Difficulty Distribution"
-          />
-        </motion.div>
-
-        {/* Achievements */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, delay: 0.7 }}
-        >
-          <h2 className="text-xl font-semibold text-[#f8fafc] mb-4">Achievements</h2>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {mockAchievements.slice(0, 8).map((achievement, index) => (
-              <motion.div
-                key={achievement.id}
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ delay: index * 0.05 }}
-                className="bg-[#12121a] border border-[#2a2a35] rounded-xl p-4 text-center hover:border-[#6366f1]/50 transition-colors"
-              >
-                <span className="text-3xl mb-2 block">{achievement.icon}</span>
-                <h3 className="text-sm font-medium text-[#f8fafc]">{achievement.name}</h3>
-                <p className="text-xs text-[#64748b] mt-1">{achievement.description}</p>
-              </motion.div>
-            ))}
-          </div>
-        </motion.div>
+        {(difficultyDistribution.easy > 0 || difficultyDistribution.medium > 0 || difficultyDistribution.hard > 0) && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, delay: 0.6 }}
+            className="mb-8"
+          >
+            <DifficultyChart
+              data={difficultyDistribution}
+              title="Difficulty Distribution"
+            />
+          </motion.div>
+        )}
       </div>
 
       <Footer />

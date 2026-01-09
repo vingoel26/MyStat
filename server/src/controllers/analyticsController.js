@@ -1,4 +1,8 @@
-import { query } from '../config/database.js';
+import Submission from '../models/Submission.js';
+import DailyStat from '../models/DailyStat.js';
+import RatingHistory from '../models/RatingHistory.js';
+import PlatformAccount from '../models/PlatformAccount.js';
+import Contest from '../models/Contest.js';
 
 /**
  * Get dashboard statistics
@@ -8,31 +12,42 @@ export const getDashboardStats = async (req, res) => {
         const userId = req.user.id;
 
         // Get summary stats
-        const statsResult = await query(
-            'SELECT * FROM user_stats_summary WHERE user_id = $1',
-            [userId]
-        );
+        const [submissionStats, difficultyDist, recentActivity] = await Promise.all([
+            // Summary stats
+            Submission.aggregate([
+                { $match: { user: userId } },
+                {
+                    $group: {
+                        _id: null,
+                        total_submissions: { $sum: 1 },
+                        total_solved: { $sum: { $cond: [{ $eq: ['$status', 'solved'] }, 1, 0] } }
+                    }
+                }
+            ]),
+            // Difficulty distribution
+            Submission.aggregate([
+                { $match: { user: userId, status: 'solved' } },
+                { $group: { _id: '$difficulty', count: { $sum: 1 } } }
+            ]),
+            // Recent activity
+            DailyStat.find({ user: userId, problems_solved: { $gt: 0 } })
+                .sort({ date: -1 })
+                .limit(365)
+                .select('date problems_solved')
+        ]);
 
-        // Get difficulty distribution
-        const difficultyResult = await query(
-            `SELECT difficulty, COUNT(*) as count 
-       FROM submissions WHERE user_id = $1 AND status = 'solved'
-       GROUP BY difficulty`,
-            [userId]
-        );
-
-        // Get current streak
-        const streakResult = await query(
-            `SELECT date, problems_solved FROM daily_stats 
-       WHERE user_id = $1 AND problems_solved > 0
-       ORDER BY date DESC LIMIT 365`,
-            [userId]
-        );
+        const summary = submissionStats[0] || { total_submissions: 0, total_solved: 0 };
 
         res.json({
-            summary: statsResult.rows[0] || {},
-            difficulty: difficultyResult.rows,
-            recentActivity: streakResult.rows,
+            summary: {
+                total_submissions: summary.total_submissions,
+                total_solved: summary.total_solved,
+            },
+            difficulty: difficultyDist.map(d => ({ difficulty: d._id, count: d.count })),
+            recentActivity: recentActivity.map(a => ({
+                date: a.date,
+                problems_solved: a.problems_solved
+            })),
         });
     } catch (error) {
         console.error('Get dashboard stats error:', error);
@@ -47,28 +62,17 @@ export const getSubmissions = async (req, res) => {
     try {
         const { platform, difficulty, status, limit = 50, offset = 0 } = req.query;
 
-        let queryStr = `SELECT * FROM submissions WHERE user_id = $1`;
-        const params = [req.user.id];
-        let paramIndex = 2;
+        const filter = { user: req.user.id };
+        if (platform) filter.platform = platform;
+        if (difficulty) filter.difficulty = difficulty;
+        if (status) filter.status = status;
 
-        if (platform) {
-            queryStr += ` AND platform = $${paramIndex++}`;
-            params.push(platform);
-        }
-        if (difficulty) {
-            queryStr += ` AND difficulty = $${paramIndex++}`;
-            params.push(difficulty);
-        }
-        if (status) {
-            queryStr += ` AND status = $${paramIndex++}`;
-            params.push(status);
-        }
+        const submissions = await Submission.find(filter)
+            .sort({ submitted_at: -1 })
+            .skip(parseInt(offset))
+            .limit(parseInt(limit));
 
-        queryStr += ` ORDER BY submitted_at DESC LIMIT $${paramIndex++} OFFSET $${paramIndex}`;
-        params.push(limit, offset);
-
-        const result = await query(queryStr, params);
-        res.json(result.rows);
+        res.json(submissions);
     } catch (error) {
         console.error('Get submissions error:', error);
         res.status(500).json({ error: 'Failed to get submissions' });
@@ -80,13 +84,20 @@ export const getSubmissions = async (req, res) => {
  */
 export const getHeatmapData = async (req, res) => {
     try {
-        const result = await query(
-            `SELECT date, problems_solved FROM daily_stats 
-       WHERE user_id = $1 AND date >= NOW() - INTERVAL '1 year'
-       ORDER BY date`,
-            [req.user.id]
-        );
-        res.json(result.rows);
+        const oneYearAgo = new Date();
+        oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+
+        const data = await DailyStat.find({
+            user: req.user.id,
+            date: { $gte: oneYearAgo }
+        })
+            .sort({ date: 1 })
+            .select('date problems_solved');
+
+        res.json(data.map(d => ({
+            date: d.date,
+            problems_solved: d.problems_solved
+        })));
     } catch (error) {
         console.error('Get heatmap error:', error);
         res.status(500).json({ error: 'Failed to get heatmap data' });
@@ -98,12 +109,15 @@ export const getHeatmapData = async (req, res) => {
  */
 export const getRatingHistory = async (req, res) => {
     try {
-        const result = await query(
-            `SELECT platform, rating, recorded_at FROM rating_history 
-       WHERE user_id = $1 ORDER BY recorded_at`,
-            [req.user.id]
-        );
-        res.json(result.rows);
+        const data = await RatingHistory.find({ user: req.user.id })
+            .sort({ recorded_at: 1 })
+            .select('platform rating recorded_at');
+
+        res.json(data.map(d => ({
+            platform: d.platform,
+            rating: d.rating,
+            recorded_at: d.recorded_at
+        })));
     } catch (error) {
         console.error('Get rating history error:', error);
         res.status(500).json({ error: 'Failed to get rating history' });
@@ -115,13 +129,15 @@ export const getRatingHistory = async (req, res) => {
  */
 export const getTopicBreakdown = async (req, res) => {
     try {
-        const result = await query(
-            `SELECT unnest(tags) as topic, COUNT(*) as count
-       FROM submissions WHERE user_id = $1 AND status = 'solved'
-       GROUP BY topic ORDER BY count DESC LIMIT 20`,
-            [req.user.id]
-        );
-        res.json(result.rows);
+        const data = await Submission.aggregate([
+            { $match: { user: req.user.id, status: 'solved' } },
+            { $unwind: '$tags' },
+            { $group: { _id: '$tags', count: { $sum: 1 } } },
+            { $sort: { count: -1 } },
+            { $limit: 20 }
+        ]);
+
+        res.json(data.map(d => ({ topic: d._id, count: d.count })));
     } catch (error) {
         console.error('Get topic breakdown error:', error);
         res.status(500).json({ error: 'Failed to get topics' });
@@ -133,14 +149,22 @@ export const getTopicBreakdown = async (req, res) => {
  */
 export const getConsistencyMetrics = async (req, res) => {
     try {
-        const result = await query(
-            `SELECT COUNT(*) as active_days,
-              SUM(problems_solved) as total_problems,
-              AVG(problems_solved) as avg_per_day
-       FROM daily_stats WHERE user_id = $1 AND date >= NOW() - INTERVAL '30 days'`,
-            [req.user.id]
-        );
-        res.json(result.rows[0] || {});
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+        const data = await DailyStat.aggregate([
+            { $match: { user: req.user.id, date: { $gte: thirtyDaysAgo } } },
+            {
+                $group: {
+                    _id: null,
+                    active_days: { $sum: 1 },
+                    total_problems: { $sum: '$problems_solved' },
+                    avg_per_day: { $avg: '$problems_solved' }
+                }
+            }
+        ]);
+
+        res.json(data[0] || { active_days: 0, total_problems: 0, avg_per_day: 0 });
     } catch (error) {
         console.error('Get consistency error:', error);
         res.status(500).json({ error: 'Failed to get consistency' });
@@ -152,13 +176,12 @@ export const getConsistencyMetrics = async (req, res) => {
  */
 export const getDifficultyDistribution = async (req, res) => {
     try {
-        const result = await query(
-            `SELECT difficulty, COUNT(*) as count
-       FROM submissions WHERE user_id = $1 AND status = 'solved'
-       GROUP BY difficulty`,
-            [req.user.id]
-        );
-        res.json(result.rows);
+        const data = await Submission.aggregate([
+            { $match: { user: req.user.id, status: 'solved' } },
+            { $group: { _id: '$difficulty', count: { $sum: 1 } } }
+        ]);
+
+        res.json(data.map(d => ({ difficulty: d._id, count: d.count })));
     } catch (error) {
         console.error('Get difficulty error:', error);
         res.status(500).json({ error: 'Failed to get difficulty distribution' });
