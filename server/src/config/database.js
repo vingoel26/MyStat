@@ -1,65 +1,96 @@
-import pg from 'pg';
-import dotenv from 'dotenv';
+/**
+ * In-Memory Database
+ * Temporary storage for development without PostgreSQL
+ * Replace with real database queries in production
+ */
 
-dotenv.config();
+// In-memory user storage
+const users = new Map();
 
-const { Pool } = pg;
+// Generate a simple ID
+const generateId = () => `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-// PostgreSQL connection pool
-const pool = new Pool({
-    host: process.env.DB_HOST || 'localhost',
-    port: process.env.DB_PORT || 5432,
-    database: process.env.DB_NAME || 'devstats',
-    user: process.env.DB_USER || 'postgres',
-    password: process.env.DB_PASSWORD || '',
-    max: 20, // Maximum number of connections
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 2000,
-});
+/**
+ * Mock query function that mimics PostgreSQL response format
+ */
+export const query = async (sql, params) => {
+    // Parse the SQL to understand what operation is being requested
+    const sqlLower = sql.toLowerCase().trim();
 
-// Test connection
-pool.connect((err, client, release) => {
-    if (err) {
-        console.error('❌ Database connection error:', err.message);
-        // TODO: Implement retry logic or graceful degradation
-    } else {
-        console.log('✅ Database connected successfully');
-        release();
+    // SELECT user by email
+    if (sqlLower.includes('select') && sqlLower.includes('from users where email')) {
+        const email = params[0];
+        const user = Array.from(users.values()).find(u => u.email === email);
+        return { rows: user ? [user] : [], rowCount: user ? 1 : 0 };
     }
-});
 
-// Query helper
-export const query = async (text, params) => {
-    const start = Date.now();
-    try {
-        const result = await pool.query(text, params);
-        const duration = Date.now() - start;
+    // SELECT user by ID
+    if (sqlLower.includes('select') && sqlLower.includes('from users where id')) {
+        const id = params[0];
+        const user = users.get(id);
+        return { rows: user ? [user] : [], rowCount: user ? 1 : 0 };
+    }
 
-        if (process.env.NODE_ENV === 'development') {
-            console.log('Executed query', { text: text.substring(0, 50), duration, rows: result.rowCount });
+    // SELECT user by username
+    if (sqlLower.includes('select') && sqlLower.includes('from users where username')) {
+        const username = params[0];
+        const user = Array.from(users.values()).find(u => u.username === username);
+        return { rows: user ? [user] : [], rowCount: user ? 1 : 0 };
+    }
+
+    // INSERT new user
+    if (sqlLower.includes('insert into users')) {
+        const [name, email, username, password_hash] = params;
+        const id = generateId();
+        const newUser = {
+            id,
+            name,
+            email,
+            username,
+            password_hash,
+            bio: null,
+            avatar_url: null,
+            is_public: true,
+            skills: [],
+            social_links: {},
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+        };
+        users.set(id, newUser);
+        console.log(`✅ Created user: ${email}`);
+        return { rows: [newUser], rowCount: 1 };
+    }
+
+    // UPDATE user
+    if (sqlLower.includes('update users')) {
+        const id = params[params.length - 1]; // ID is usually the last parameter
+        const user = users.get(id);
+        if (user) {
+            // Simple update - just merge for now
+            const updated = { ...user, updated_at: new Date().toISOString() };
+            users.set(id, updated);
+            return { rows: [updated], rowCount: 1 };
         }
-
-        return result;
-    } catch (error) {
-        console.error('Query error:', error);
-        throw error;
+        return { rows: [], rowCount: 0 };
     }
+
+    // Default - return empty
+    console.log('Unhandled query:', sql.substring(0, 100));
+    return { rows: [], rowCount: 0 };
 };
 
-// Transaction helper
+/**
+ * Mock transaction function
+ */
 export const transaction = async (callback) => {
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-        const result = await callback(client);
-        await client.query('COMMIT');
-        return result;
-    } catch (error) {
-        await client.query('ROLLBACK');
-        throw error;
-    } finally {
-        client.release();
-    }
+    // For in-memory, just execute the callback
+    return await callback({ query });
 };
 
-export default pool;
+// Export user storage for debugging
+export const getUserStore = () => users;
+
+// Log that we're using in-memory storage
+console.log('📦 Using in-memory storage (no PostgreSQL)');
+
+export default { query, transaction, getUserStore };

@@ -53,4 +53,18 @@ router.get('/:platformId/submissions', authenticate, platformController.getPlatf
  */
 router.get('/:platformId/contests', authenticate, platformController.getPlatformContests);
 
+/**
+ * @route   GET /api/platforms/supported
+ * @desc    Get list of supported platforms
+ * @access  Public
+ */
+router.get('/supported', platformController.getSupportedPlatforms);
+
+/**
+ * @route   GET /api/platforms/:platform/test
+ * @desc    Test platform API integration (for debugging)
+ * @access  Public
+ */
+router.get('/:platform/test', platformController.testPlatform);
+
 export default router;

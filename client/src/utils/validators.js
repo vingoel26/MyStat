@@ -68,63 +68,28 @@ export const isValidUrl = (url) => {
 
 /**
  * Validate platform username based on platform rules
+ * Made lenient - the platform API will validate if the user exists
  */
 export const validatePlatformUsername = (platform, username) => {
     if (!username || username.trim().length === 0) {
         return { isValid: false, message: 'Username is required' };
     }
 
-    const platformRules = {
-        codeforces: {
-            minLength: 3,
-            maxLength: 24,
-            pattern: /^[a-zA-Z0-9_]+$/,
-            message: 'Codeforces username can only contain letters, numbers, and underscores',
-        },
-        leetcode: {
-            minLength: 1,
-            maxLength: 15,
-            pattern: /^[a-zA-Z0-9_-]+$/,
-            message: 'LeetCode username can only contain letters, numbers, underscores, and hyphens',
-        },
-        codechef: {
-            minLength: 4,
-            maxLength: 14,
-            pattern: /^[a-z][a-z0-9_]+$/i,
-            message: 'CodeChef username must start with a letter',
-        },
-        github: {
-            minLength: 1,
-            maxLength: 39,
-            pattern: /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/,
-            message: 'GitHub username can only contain alphanumeric characters or single hyphens',
-        },
-        gitlab: {
-            minLength: 2,
-            maxLength: 255,
-            pattern: /^[a-zA-Z0-9_][a-zA-Z0-9_.-]*[a-zA-Z0-9_]$|^[a-zA-Z0-9_]$/,
-            message: 'GitLab username format is invalid',
-        },
-    };
+    // Trim whitespace
+    const trimmed = username.trim();
 
-    const rules = platformRules[platform];
-    if (!rules) {
-        // Default validation for platforms without specific rules
-        return { isValid: username.length >= 1 && username.length <= 50, message: '' };
+    // Very lenient validation - just check basic length
+    // Platform APIs will validate if the username actually exists
+    if (trimmed.length < 1) {
+        return { isValid: false, message: 'Username is required' };
     }
 
-    if (username.length < rules.minLength) {
-        return { isValid: false, message: `Username must be at least ${rules.minLength} characters` };
+    if (trimmed.length > 100) {
+        return { isValid: false, message: 'Username is too long' };
     }
 
-    if (username.length > rules.maxLength) {
-        return { isValid: false, message: `Username must be at most ${rules.maxLength} characters` };
-    }
-
-    if (!rules.pattern.test(username)) {
-        return { isValid: false, message: rules.message };
-    }
-
+    // Allow most characters - platforms like GitHub allow dots, hyphens, etc.
+    // The actual platform API will tell us if the username is valid
     return { isValid: true, message: '' };
 };
 

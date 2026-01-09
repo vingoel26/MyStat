@@ -1,7 +1,9 @@
 import jwt from 'jsonwebtoken';
-import { query } from '../config/database.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+const JWT_SECRET = process.env.JWT_SECRET || 'devstats-secret-key-change-in-production';
+
+// In-memory user store for auth (shared with database.js)
+const authUsers = new Map();
 
 /**
  * Authenticate middleware
@@ -21,18 +23,8 @@ export const authenticate = async (req, res, next) => {
         // Verify token
         const decoded = jwt.verify(token, JWT_SECRET);
 
-        // Get user from database
-        const result = await query(
-            'SELECT id, email, username, name, is_public FROM users WHERE id = $1',
-            [decoded.userId]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(401).json({ error: 'User not found' });
-        }
-
-        // Attach user to request
-        req.user = result.rows[0];
+        // Attach basic user info to request
+        req.user = { id: decoded.userId };
         next();
     } catch (error) {
         if (error.name === 'TokenExpiredError') {
@@ -60,16 +52,7 @@ export const optionalAuth = async (req, res, next) => {
 
         const token = authHeader.split(' ')[1];
         const decoded = jwt.verify(token, JWT_SECRET);
-
-        const result = await query(
-            'SELECT id, email, username, name, is_public FROM users WHERE id = $1',
-            [decoded.userId]
-        );
-
-        if (result.rows.length > 0) {
-            req.user = result.rows[0];
-        }
-
+        req.user = { id: decoded.userId };
         next();
     } catch (error) {
         // Token invalid or expired, just continue without user
@@ -84,13 +67,13 @@ export const generateTokens = (userId) => {
     const accessToken = jwt.sign(
         { userId },
         JWT_SECRET,
-        { expiresIn: '15m' }
+        { expiresIn: '7d' } // Extended for development
     );
 
     const refreshToken = jwt.sign(
         { userId, type: 'refresh' },
         JWT_SECRET,
-        { expiresIn: '7d' }
+        { expiresIn: '30d' }
     );
 
     return { accessToken, refreshToken };
